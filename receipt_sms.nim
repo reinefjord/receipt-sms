@@ -3,9 +3,11 @@ import std/[
   parsecfg,
   strformat,
   strutils,
+  sugar,
   tables,
-  times
+  times,
 ]
+from std/unicode import nil
 import db_connector/db_sqlite
 import mummy, mummy/routers
 import webby
@@ -27,16 +29,15 @@ var
 
 initLock(L)
 
-proc newReceipt(fromNumber, smsId, message: string; smsTimestamp: DateTime): string =
+proc getUser(fromNumber: string): string =
   {.gcsafe.}:
-    let user =
-      try:
-        users[fromNumber]
-      except KeyError:
-        return ""
+    try:
+      users[fromNumber]
+    except KeyError:
+      ""
 
+proc newReceipt(user, smsId, message: string; smsTimestamp: DateTime): string =
   let messageSplit = message.strip().rsplit(maxsplit=1)
-
   if messageSplit.len < 2:
     return "Behöver ett namn och summa!"
 
@@ -59,6 +60,31 @@ proc newReceipt(fromNumber, smsId, message: string; smsTimestamp: DateTime): str
 
   result = "Sparat!"
 
+proc mark(user, smsId: string; smsTimestamp: DateTime): string =
+  {.gcsafe.}:
+    withLock L:
+      db.exec(sql"INSERT INTO mark (sms_id, timestamp, user) VALUES (?, ?, ?)",
+              smsId, smsTimestamp, user)
+  result = "Stängde perioden."
+
+proc sum(): string =
+  var sums: seq[Row]
+  {.gcsafe.}:
+    withLock L:
+      sums = db.getAllRows(sql"""SELECT user, sum(amount) FROM receipts
+                                 WHERE timestamp >= (
+                                   SELECT coalesce(max(timestamp), "1970-01-01T00:00:00Z") FROM mark
+                                 )
+                                 GROUP BY user""")
+  let sumStrs = collect:
+    for row in sums:
+      let
+        user = row[0]
+        sum = row[1].parseFloat / 100
+      fmt"{user}: {sum}"
+  result = sumStrs.join("\n")
+  echo result
+
 proc newSms(request: Request) {.gcsafe.} =
   {.gcsafe.}:
     withLock L:
@@ -72,6 +98,7 @@ proc newSms(request: Request) {.gcsafe.} =
     fromNumber = data["from"]
     toNumber = data["to"]
     message = data["message"]
+    user = getUser(fromNumber)
 
   {.gcsafe.}:
     withLock L:
@@ -88,9 +115,17 @@ proc newSms(request: Request) {.gcsafe.} =
         return
 
   if message.startsWith('!'):
-    request.respond(200, body = "Inte klart än.")
+    var cmd = message.strip(trailing = false, chars = {'!'}).strip()
+    cmd = unicode.toLower(cmd)
+    echo cmd == "stäng"
+    if cmd == "stäng":
+      let response = mark(user, smsId, smsTimestamp)
+      request.respond(200, body = response)
+    elif cmd == "summa":
+      let response = sum()
+      request.respond(200, body = response)
   else:
-    let response = newReceipt(fromNumber, smsId, message, smsTimestamp)
+    let response = newReceipt(user, smsId, message, smsTimestamp)
     request.respond(200, body = response)
 
 when isMainModule:
@@ -104,11 +139,17 @@ when isMainModule:
                 )""")
 
   db.exec(sql"""CREATE TABLE IF NOT EXISTS receipts (
-                  smsId TEXT,
+                  sms_id TEXT,
                   timestamp TEXT,
                   user TEXT,
                   name TEXT,
                   amount INTEGER
+                )""")
+
+  db.exec(sql"""CREATE TABLE IF NOT EXISTS mark (
+                  sms_id TEXT,
+                  timestamp TEXT,
+                  user TEXT
                 )""")
 
   var router: Router
