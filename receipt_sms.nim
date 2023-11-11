@@ -52,7 +52,7 @@ proc newReceipt(user, smsId, message: string; smsTimestamp: DateTime): string =
   {.gcsafe.}:
     withLock L:
       db.exec(sql"""INSERT INTO receipts
-                      (smsId, timestamp, user, name, amount)
+                      (sms_id, timestamp, user, name, amount)
                     VALUES
                       (?, ?, ?, ?, ?)
                     """,
@@ -83,7 +83,25 @@ proc sum(): string =
         sum = row[1].parseFloat / 100
       fmt"{user}: {sum}"
   result = sumStrs.join("\n")
-  echo result
+
+proc undo(user: string): string =
+  var undone: Row
+  {.gcsafe.}:
+    withLock L:
+      undone = db.getRow(sql"""DELETE FROM receipts
+                               WHERE
+                                 user = ?
+                               AND
+                                 timestamp >= (
+                                   SELECT coalesce(max(timestamp), "1970-01-01T00:00:00Z") FROM mark
+                                 )
+                               RETURNING timestamp, name, amount
+                               ORDER BY timestamp DESC LIMIT 1""", user)
+  if undone[0] != "":
+    let amount = undone[2].parseFloat / 100
+    result = &"Tog bort:\n{undone[0]}\n{undone[1]} {amount} SEK"
+  else:
+    result = "Inga kvitton sparade denna period."
 
 proc newSms(request: Request) {.gcsafe.} =
   {.gcsafe.}:
@@ -117,12 +135,14 @@ proc newSms(request: Request) {.gcsafe.} =
   if message.startsWith('!'):
     var cmd = message.strip(trailing = false, chars = {'!'}).strip()
     cmd = unicode.toLower(cmd)
-    echo cmd == "stäng"
     if cmd == "stäng":
       let response = mark(user, smsId, smsTimestamp)
       request.respond(200, body = response)
     elif cmd == "summa":
       let response = sum()
+      request.respond(200, body = response)
+    elif cmd == "ångra":
+      let response = undo(user)
       request.respond(200, body = response)
   else:
     let response = newReceipt(user, smsId, message, smsTimestamp)
