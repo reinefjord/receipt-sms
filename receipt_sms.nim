@@ -1,6 +1,8 @@
 import std/[
   locks,
+  math,
   parsecfg,
+  sequtils,
   strformat,
   strutils,
   sugar,
@@ -76,12 +78,15 @@ proc sum(): string =
                                    SELECT coalesce(max(timestamp), "1970-01-01T00:00:00Z") FROM mark
                                  )
                                  GROUP BY user""")
-  let sumStrs = collect:
+  var sumStrs = collect:
     for row in sums:
       let
         user = row[0]
         sum = row[1].parseFloat / 100
       fmt"{user}: {sum}"
+
+  let total = sum(sums.mapIt(it[1].parseInt)).float / 100
+  sumStrs.add(fmt"total: {total}")
   result = sumStrs.join("\n")
 
 proc undo(user: string): string =
